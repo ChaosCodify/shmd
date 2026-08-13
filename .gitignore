@@ -1,0 +1,6 @@
+node_modules/
+target/
+builds/
+dist-electron/
+*.log
+src-tauri/gen/schemas/

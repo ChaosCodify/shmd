@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BYTE</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap">
+<style>
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+
+:root {
+  --bg: #000000;
+  --bg2: #050505;
+  --bg3: #0a0a0a;
+  --border: #0a1a0a;
+  --border2: #112211;
+  --text: #00ff41;
+  --text2: #00cc33;
+  --text3: #008800;
+  --text4: #004400;
+  --accent: #00ff41;
+  --accent-glow: rgba(0,255,65,0.08);
+  --selection: rgba(0,255,65,0.15);
+  --cursor-color: #00ff41;
+  --titlebar-bg: #000000;
+  --toolbar-bg: #020202;
+  --sidebar-bg: #020202;
+  --status-bg: #000000;
+  --tab-active: #050505;
+  --tab-hover: #080808;
+  --scrollbar-track: #000000;
+  --scrollbar-thumb: #0a1a0a;
+  --font: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  --cm-bg: #000000;
+  --cm-text: #00ff41;
+  --cm-gutter: #050505;
+  --cm-cursor: #00ff41;
+  --cm-selection: rgba(0,255,65,0.15);
+  --cm-activeline: rgba(0,255,65,0.03);
+  --cm-matchingbracket: rgba(0,255,65,0.3);
+}
+
+html, body { width:100%; height:100%; background:var(--bg); color:var(--text); font-family:var(--font); font-size:14px; line-height:1.5; overflow:hidden; user-select:none; }
+
+::-webkit-scrollbar { width:5px; height:5px; }
+::-webkit-scrollbar-track { background:var(--scrollbar-track); }
+::-webkit-scrollbar-thumb { background:var(--scrollbar-thumb); border-radius:2px; }
+::-webkit-scrollbar-thumb:hover { background:var(--border2); }
+
+/* CRT scanline effect */
+body.crt::after {
+  content:''; position:fixed; inset:0; pointer-events:none; z-index:99999;
+  background:repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,65,0.015) 2px, rgba(0,255,65,0.015) 4px);
+}
+
+/* CRT glow on text */
+body.crt #editor-area .CodeMirror, body.crt .tab-item.active .tab-name, body.crt #statusbar .logo {
+  text-shadow: 0 0 8px rgba(0,255,65,0.3);
+}
+
+/* ── Titlebar ── */
+#titlebar {
+  -webkit-app-region:drag; height:34px; background:var(--titlebar-bg);
+  border-bottom:1px solid var(--border); display:flex; align-items:center;
+  padding:0 0 0 12px; gap:8px; font-family:var(--font);
+}
+#titlebar .logo { font-size:14px; font-weight:600; color:var(--text); letter-spacing:2px; }
+#titlebar .logo .cursor-blink { animation:blink 1s step-end infinite; color:var(--text); }
+#titlebar .file-name { font-size:11px; color:var(--text3); margin-left:6px; }
+#titlebar .file-name.modified::before { content:'*'; color:var(--text); margin-right:3px; }
+#titlebar .spacer { flex:1; -webkit-app-region:drag; }
+
+/* ── Window Controls ── */
+.win-controls { -webkit-app-region:no-drag; display:flex; height:100%; }
+.win-btn {
+  width:44px; height:34px; display:flex; align-items:center; justify-content:center;
+  background:none; border:none; cursor:pointer; color:var(--text3); transition:all 0.1s;
+  font-family:var(--font); font-size:16px; font-weight:300;
+}
+.win-btn:hover { color:var(--text); background:var(--bg2); }
+.win-btn.close:hover { color:#000; background:#ff3333; }
+
+/* ── Main ── */
+#main { display:flex; height:calc(100vh - 34px - 30px); overflow:hidden; }
+
+/* ── Sidebar ── */
+#sidebar {
+  width:180px; background:var(--sidebar-bg); border-right:1px solid var(--border);
+  display:flex; flex-direction:column; overflow:hidden; flex-shrink:0;
+  transition:width 0.12s, opacity 0.12s;
+}
+#sidebar.collapsed { width:0; opacity:0; pointer-events:none; }
+#sidebar-header {
+  padding:6px 8px; font-size:9px; color:var(--text3); text-transform:uppercase;
+  letter-spacing:2px; border-bottom:1px solid var(--border); font-family:var(--font);
+  display:flex; align-items:center; justify-content:space-between;
+}
+#sidebar-header .count { color:var(--text4); }
+#tab-list { flex:1; overflow-y:auto; overflow-x:hidden; padding:2px 0; }
+.tab-item {
+  display:flex; align-items:center; padding:4px 8px; cursor:pointer; gap:5px;
+  border-left:2px solid transparent; transition:all 0.08s;
+}
+.tab-item:hover { background:var(--tab-hover); }
+.tab-item.active { background:var(--tab-active); border-left-color:var(--text); }
+.tab-item .icon { font-size:10px; color:var(--text3); flex-shrink:0; }
+.tab-item.active .icon { color:var(--text); }
+.tab-item .name {
+  font-size:11px; color:var(--text2); white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; flex:1;
+}
+.tab-item.active .name { color:var(--text); }
+.tab-item .modified { width:5px; height:5px; border-radius:50%; background:var(--text); flex-shrink:0; opacity:0; }
+.tab-item .modified.show { opacity:1; }
+.tab-item .close {
+  width:14px; height:14px; display:flex; align-items:center; justify-content:center;
+  background:none; border:none; color:var(--text4); cursor:pointer; font-size:11px; opacity:0;
+  transition:all 0.08s; flex-shrink:0;
+}
+.tab-item:hover .close { opacity:1; }
+.tab-item .close:hover { color:#000; background:#ff3333; border-radius:2px; }
+
+/* ── Editor Area ── */
+#editor-area { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+#editor-wrap { flex:1; overflow:hidden; position:relative; }
+
+/* CodeMirror overrides */
+.CodeMirror {
+  height:100% !important; font-family:var(--font) !important;
+  font-size:14px !important; line-height:1.55 !important;
+  background:var(--cm-bg) !important; color:var(--cm-text) !important;
+}
+.CodeMirror-gutters {
+  background:var(--cm-gutter) !important; border-right:1px solid var(--border) !important;
+}
+.CodeMirror-linenumber {
+  color:var(--text4) !important; font-size:12px !important; padding:0 8px 0 4px !important;
+}
+.CodeMirror-selected { background:var(--cm-selection) !important; }
+.CodeMirror-focused .CodeMirror-selected { background:var(--cm-selection) !important; }
+.CodeMirror-cursor { border-left:2px solid var(--cm-cursor) !important; }
+.CodeMirror-activeline-background { background:var(--cm-activeline) !important; }
+.CodeMirror-matchingbracket { background:var(--cm-matchingbracket) !important; outline:0 !important; color:var(--text) !important; }
+.CodeMirror-nonmatchingbracket { color:#ff3333 !important; }
+
+/* CodeMirror syntax colors */
+.cm-s-default .cm-keyword { color:#00ffaa !important; }
+.cm-s-default .cm-atom { color:#00dddd !important; }
+.cm-s-default .cm-number { color:#00dd88 !important; }
+.cm-s-default .cm-def { color:#00ff66 !important; }
+.cm-s-default .cm-variable { color:var(--text) !important; }
+.cm-s-default .cm-variable-2 { color:var(--text2) !important; }
+.cm-s-default .cm-variable-3 { color:#00dd66 !important; }
+.cm-s-default .cm-property { color:var(--text) !important; }
+.cm-s-default .cm-operator { color:#00cc44 !important; }
+.cm-s-default .cm-comment { color:#004400 !important; font-style:italic; }
+.cm-s-default .cm-string { color:#00cc66 !important; }
+.cm-s-default .cm-string-2 { color:#00aa55 !important; }
+.cm-s-default .cm-meta { color:#008844 !important; }
+.cm-s-default .cm-qualifier { color:#00ff55 !important; }
+.cm-s-default .cm-builtin { color:#00ffaa !important; }
+.cm-s-default .cm-bracket { color:var(--text4) !important; }
+.cm-s-default .cm-tag { color:#00ff88 !important; }
+.cm-s-default .cm-attribute { color:#00dd77 !important; }
+.cm-s-default .cm-hr { color:var(--text4) !important; }
+.cm-s-default .cm-link { color:#00dddd !important; text-decoration:underline; }
+.cm-s-default .cm-error { color:#ff3333 !important; }
+.cm-s-default .cm-header { color:var(--text) !important; font-weight:600; }
+.cm-s-default .cm-quote { color:var(--text3) !important; font-style:italic; }
+
+/* ── Status Bar ── */
+#statusbar {
+  height:30px; background:var(--status-bg); border-top:1px solid var(--border);
+  display:flex; align-items:center; padding:0 10px; font-size:10px; color:var(--text3);
+  font-family:var(--font); gap:10px;
+}
+#statusbar .logo { font-size:11px; font-weight:600; color:var(--text2); letter-spacing:1px; margin-right:4px; }
+#statusbar .sep { width:1px; height:12px; background:var(--border); }
+#statusbar .right { margin-left:auto; display:flex; gap:10px; }
+.mode-badge {
+  padding:1px 6px; border-radius:2px; font-size:9px; font-weight:600;
+  text-transform:uppercase; letter-spacing:1px;
+  background:rgba(0,255,65,0.08); color:var(--text); border:1px solid rgba(0,255,65,0.2);
+}
+
+/* ── Toast ── */
+#toast {
+  position:fixed; bottom:40px; left:50%; transform:translateX(-50%) translateY(20px);
+  background:var(--bg2); border:1px solid var(--border2); color:var(--text);
+  font-family:var(--font); font-size:11px; padding:5px 14px;
+  opacity:0; transition:all 0.2s; z-index:10000; pointer-events:none;
+}
+#toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.pulse { animation:pulse 2s ease infinite; }
+
+/* ── Theme dots ── */
+.theme-dots {
+  position:fixed; bottom:33px; right:10px; display:flex; gap:3px; z-index:100;
+}
+.theme-dot {
+  width:8px; height:8px; border-radius:50%; border:1px solid var(--text4);
+  cursor:pointer; transition:all 0.12s;
+}
+.theme-dot:hover { transform:scale(1.3); border-color:var(--text); }
+.theme-dot.active { border-color:var(--text); box-shadow:0 0 4px var(--accent-glow); }
+</style>
+</head>
+<body class="crt">
+  <!-- Titlebar -->
+  <div id="titlebar">
+    <div class="logo">BYTE<span class="cursor-blink">_</span></div>
+    <div class="file-name" id="fileName">untitled</div>
+    <div class="spacer"></div>
+    <div class="win-controls">
+      <button class="win-btn" onclick="call('minimize')" title="Minimize">─</button>
+      <button class="win-btn" onclick="call('maximize')" title="Maximize">□</button>
+      <button class="win-btn close" onclick="call('close')" title="Close">✕</button>
+    </div>
+  </div>
+
+  <!-- Main -->
+  <div id="main">
+    <div id="sidebar">
+      <div id="sidebar-header">
+        <span>FILES</span><span class="count" id="fileCount">0</span>
+      </div>
+      <div id="tab-list"></div>
+    </div>
+    <div id="editor-area">
+      <div id="editor-wrap"><textarea id="editor"></textarea></div>
+    </div>
+  </div>
+
+  <!-- Status Bar -->
+  <div id="statusbar">
+    <span class="logo">></span>
+    <span id="statusFile" style="color:var(--text2)">untitled</span>
+    <span class="sep"></span>
+    <span id="statusLang">Plain Text</span>
+    <span class="sep"></span>
+    <span id="statusCursor">Ln 1 Col 1</span>
+    <span class="right">
+      <span id="statusTheme">MATRIX</span>
+    </span>
+  </div>
+
+  <div id="toast"></div>
+  <div class="theme-dots" id="themeDots"></div>
+
+  <!-- CodeMirror 5 CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/mode/xml/xml.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/mode/javascript/javascript.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/mode/css/css.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/mode/python/python.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/mode/markdown/markdown.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/mode/clike/clike.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/mode/shell/shell.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/addon/edit/closebrackets.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/addon/edit/matchbrackets.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.18/addon/selection/active-line.min.js"></script>
+
+  <script>
+  // ─── Tauri IPC ───
+  let api;
+  async function initAPI() {
+    try {
+      const { invoke } = window.__TAURI__?.core || {};
+      if (invoke) {
+        api = { readFile: (p) => invoke('read_file', { path:p }), writeFile: (p,c) => invoke('write_file', { path:p, content:c }), getFileName: (p) => invoke('get_file_name', { path:p }) };
+      } else {
+        api = null;
+      }
+    } catch(e) { api = null; }
+    if (!api) {
+      const { invoke } = window.__TAURI__?.core || {};
+      if (invoke) api = invoke;
+    }
+  }
+  function call(method) {
+    const w = window.__TAURI__?.window;
+    if (w) { const c = w.getCurrentWindow(); if (method==='minimize') c.minimize(); else if (method==='maximize') c.toggleMaximize(); else if (method==='close') c.close(); }
+  }
+
+  // ─── State ───
+  let tabs = [], activeTabId = null, tabIdCounter = 0, currentTheme = 0;
+  let cm; // CodeMirror instance
+
+  // Language detection by file extension
+  const langMap = {
+    html:'xml', htm:'xml', xhtml:'xml', svg:'xml',
+    js:'javascript', mjs:'javascript', cjs:'javascript', ts:'javascript', jsx:'javascript', tsx:'javascript',
+    css:'css', scss:'css', less:'css',
+    py:'python', rpy:'python',
+    md:'markdown', markdown:'markdown',
+    json:'javascript', xml:'xml', yaml:'yaml', yml:'yaml', toml:'yaml',
+    sh:'shell', bash:'shell', zsh:'shell', fish:'shell',
+    c:'clike', cpp:'clike', cs:'clike', java:'clike', h:'clike', hpp:'clike',
+    rs:'rust', go:'go', rb:'ruby', php:'php', sql:'sql', swift:'swift', kt:'kotlin',
+    txt:null
+  };
+  function detectLang(name) {
+    const ext = name.split('.').pop().toLowerCase();
+    return langMap[ext] || null;
+  }
+
+  // ─── Tab Management ───
+  function createTab(name, content, filePath) {
+    const id = ++tabIdCounter;
+    const lang = detectLang(name);
+    tabs.push({ id, name, content:content||'', filePath:filePath||null, modified:false, lang, cursor:{line:0,ch:0}, scroll:0 });
+    activateTab(id);
+    renderSidebar();
+    return id;
+  }
+
+  function activateTab(id) {
+    if (activeTabId && cm) {
+      const prev = tabs.find(t=>t.id===activeTabId);
+      if (prev) { prev.content = cm.getValue(); prev.cursor = cm.getCursor(); prev.scroll = cm.getScrollInfo().top; }
+    }
+    activeTabId = id;
+    const tab = tabs.find(t=>t.id===id);
+    if (!tab) return;
+
+    const mode = tab.lang || 'text/plain';
+    cm.setOption('mode', mode);
+    cm.setValue(tab.content);
+    cm.setCursor(tab.cursor);
+    if (tab.scroll) cm.scrollTo(null, tab.scroll);
+
+    const displayName = tab.filePath ? tab.filePath.split(/[/\\]/).pop() : tab.name;
+    document.getElementById('fileName').textContent = displayName;
+    document.getElementById('fileName').className = 'file-name'+(tab.modified?' modified':'');
+    document.getElementById('statusFile').textContent = displayName;
+    document.getElementById('statusLang').textContent = tab.lang ? tab.lang.toUpperCase() : 'PLAIN TEXT';
+    renderSidebar();
+  }
+
+  function closeTab(id) {
+    const idx = tabs.findIndex(t=>t.id===id);
+    if (idx===-1) return;
+    const tab = tabs[idx];
+    if (tab.modified && !confirm(`"${tab.name}" has unsaved changes. Close anyway?`) ) return;
+    tabs.splice(idx,1);
+    if (tabs.length===0) { createTab('untitled',''); }
+    else if (activeTabId===id) { activateTab(tabs[Math.min(idx,tabs.length-1)].id); }
+    renderSidebar();
+  }
+
+  function renderSidebar() {
+    const list = document.getElementById('tab-list');
+    list.innerHTML = '';
+    document.getElementById('fileCount').textContent = tabs.length;
+    tabs.forEach(tab => {
+      const el = document.createElement('div');
+      el.className = 'tab-item'+(tab.id===activeTabId?' active':'');
+      el.innerHTML = `<span class="icon">◆</span><span class="name">${tab.name}</span><span class="modified${tab.modified?' show':''}"></span><button class="close">×</button>`;
+      el.onclick = () => activateTab(tab.id);
+      el.querySelector('.close').onclick = (e) => { e.stopPropagation(); closeTab(tab.id); };
+      list.appendChild(el);
+    });
+  }
+
+  function getActiveTab() { return tabs.find(t=>t.id===activeTabId); }
+
+  // ─── Init CodeMirror ───
+  function initCM() {
+    cm = CodeMirror.fromTextArea(document.getElementById('editor'), {
+      lineNumbers: true,
+      matchBrackets: true,
+      autoCloseBrackets: true,
+      styleActiveLine: true,
+      indentUnit: 2,
+      tabSize: 2,
+      indentWithTabs: false,
+      electricChars: true,
+      extraKeys: { "Tab": (cm)=>{ const s=cm.getSelection(); if(s) cm.indentSelection("add"); else cm.replaceSelection("  "); } }
+    });
+
+    cm.on('change', () => {
+      const tab = getActiveTab();
+      if (tab) { tab.modified = true; document.getElementById('fileName').className = 'file-name modified'; renderSidebar(); }
+    });
+    cm.on('cursorActivity', () => {
+      const c = cm.getCursor();
+      document.getElementById('statusCursor').textContent = `Ln ${c.line+1} Col ${c.ch+1}`;
+    });
+  }
+
+  // ─── File Actions ───
+  async function openFile() {
+    if (!api) return;
+    try {
+      const selected = await window.__TAURI__?.dialog?.open({ multiple:true, filters:[{ name:'All', extensions:['*'] }] });
+      if (!selected) return;
+      const files = Array.isArray(selected) ? selected : [selected];
+      for (const fp of files) {
+        const existing = tabs.find(t=>t.filePath===fp);
+        if (existing) { activateTab(existing.id); continue; }
+        const content = await api.readFile(fp);
+        const name = fp.split(/[/\\]/).pop();
+        if (content !== null && content !== undefined) createTab(name, content, fp);
+      }
+      showToast(`Opened ${files.length} file(s)`);
+    } catch(e) { showToast('Error opening file'); }
+  }
+
+  async function saveFile() {
+    const tab = getActiveTab(); if (!tab) return;
+    if (tab.filePath && api) {
+      try {
+        await api.writeFile(tab.filePath, cm.getValue());
+        tab.modified = false;
+        document.getElementById('fileName').className = 'file-name';
+        renderSidebar();
+        showToast('Saved');
+      } catch(e) { showToast('Save failed'); }
+    } else {
+      saveFileAs();
+    }
+  }
+
+  async function saveFileAs() {
+    if (!api) return;
+    try {
+      const fp = await window.__TAURI__?.dialog?.save({ filters:[{ name:'All', extensions:['*'] }] });
+      if (!fp) return;
+      const tab = getActiveTab(); if (!tab) return;
+      await api.writeFile(fp, cm.getValue());
+      tab.filePath = fp;
+      tab.name = fp.split(/[/\\]/).pop();
+      tab.lang = detectLang(tab.name);
+      const mode = tab.lang || 'text/plain';
+      cm.setOption('mode', mode);
+      tab.modified = false;
+      document.getElementById('fileName').textContent = tab.name;
+      document.getElementById('fileName').className = 'file-name';
+      document.getElementById('statusFile').textContent = tab.name;
+      document.getElementById('statusLang').textContent = tab.lang ? tab.lang.toUpperCase() : 'PLAIN TEXT';
+      renderSidebar();
+      showToast('Saved as '+tab.name);
+    } catch(e) { showToast('Save failed'); }
+  }
+
+  function newFile() { createTab('untitled',''); showToast('New file'); }
+
+  // ─── Themes ───
+  const themes = [
+    { name:'MATRIX', label:'Matrix', text:'#00ff41', text2:'#00cc33', text3:'#008800', text4:'#004400', border:'#0a1a0a', border2:'#112211', accent:'#00ff41', bg:'#000000', bg2:'#050505', bg3:'#0a0a0a', cmGutter:'#050505', crt:true },
+    { name:'AMBER', label:'Amber', text:'#ffb000', text2:'#cc8800', text3:'#886600', text4:'#443300', border:'#1a1400', border2:'#221c00', accent:'#ffb000', bg:'#000000', bg2:'#080500', bg3:'#0a0800', cmGutter:'#050300', crt:true },
+    { name:'TERMINAL', label:'Terminal', text:'#d0d0d0', text2:'#a0a0a0', text3:'#606060', text4:'#303030', border:'#1a1a1a', border2:'#262626', accent:'#00ff41', bg:'#000000', bg2:'#080808', bg3:'#0d0d0d', cmGutter:'#050505', crt:false },
+    { name:'NIGHTFALL', label:'Nightfall', text:'#bb9af7', text2:'#9b7ad7', text3:'#7b5ab7', text4:'#4b2a87', border:'#1a1a2e', border2:'#26263e', accent:'#bb9af7', bg:'#0a0a12', bg2:'#0e0e18', bg3:'#12121e', cmGutter:'#080810', crt:false },
+    { name:'NORD', label:'Nord', text:'#d8dee9', text2:'#a8b5c9', text3:'#68748a', text4:'#384456', border:'#2e3440', border2:'#3b4252', accent:'#88c0d0', bg:'#1e2430', bg2:'#242a36', bg3:'#2a303c', cmGutter:'#1a2028', crt:false },
+  ];
+
+  function applyTheme(idx) {
+    currentTheme = idx;
+    const t = themes[idx];
+    const r = document.documentElement;
+    r.style.setProperty('--bg', t.bg);
+    r.style.setProperty('--bg2', t.bg2);
+    r.style.setProperty('--bg3', t.bg3);
+    r.style.setProperty('--border', t.border);
+    r.style.setProperty('--border2', t.border2);
+    r.style.setProperty('--text', t.text);
+    r.style.setProperty('--text2', t.text2);
+    r.style.setProperty('--text3', t.text3);
+    r.style.setProperty('--text4', t.text4);
+    r.style.setProperty('--accent', t.accent);
+    r.style.setProperty('--accent-glow', t.text+'15');
+    r.style.setProperty('--cm-gutter', t.cmGutter);
+    r.style.setProperty('--cm-text', t.text);
+    r.style.setProperty('--cm-cursor', t.accent);
+    r.style.setProperty('--cm-selection', t.accent+'20');
+    r.style.setProperty('--cm-activeline', t.accent+'08');
+    r.style.setProperty('--cm-matchingbracket', t.accent+'40');
+
+    // syntax colors
+    const tc = {
+      keyword: t.text2, atom: t.text2, number: t.text3, def: t.text,
+      variable: t.text, 'variable-2': t.text2, 'variable-3': t.text2,
+      property: t.text, operator: t.text2, comment: t.text4,
+      string: t.text2, 'string-2': t.text3, meta: t.text3,
+      qualifier: t.text, builtin: t.text2, bracket: t.text4,
+      tag: t.text2, attribute: t.text3, hr: t.text4, link: t.text2,
+    };
+    const style = document.createElement('style');
+    let css = '';
+    for (const [k,v] of Object.entries(tc)) {
+      css += `.cm-s-default .cm-${k} { color:${v} !important; }\n`;
+    }
+    css += `.cm-s-default .cm-comment { color:${t.text4} !important; font-style:italic; }\n`;
+    css += `.cm-s-default .cm-error { color:#ff3333 !important; }\n`;
+    css += `.cm-s-default .cm-header { color:${t.text} !important; font-weight:600; }\n`;
+    style.textContent = css;
+    style.id = 'cm-theme-style';
+    const old = document.getElementById('cm-theme-style');
+    if (old) old.remove();
+    document.head.appendChild(style);
+
+    document.body.className = t.crt ? 'crt' : '';
+    document.getElementById('statusTheme').textContent = t.name;
+    document.querySelectorAll('.theme-dot').forEach((d,i)=>d.classList.toggle('active',i===idx));
+    if (cm) {
+      cm.refresh();
+    }
+  }
+
+  // ─── Keyboard ───
+  document.addEventListener('keydown', (e) => {
+    const ctrl = e.ctrlKey || e.metaKey;
+    if (ctrl && e.key==='n') { e.preventDefault(); newFile(); }
+    else if (ctrl && e.key==='o') { e.preventDefault(); openFile(); }
+    else if (ctrl && e.key==='s') { e.preventDefault(); if (e.shiftKey) saveFileAs(); else saveFile(); }
+    else if (ctrl && e.key==='w') { e.preventDefault(); const t=getActiveTab(); if(t) closeTab(t.id); }
+    else if (ctrl && e.key==='t') { e.preventDefault(); applyTheme((currentTheme+1)%themes.length); showToast('Theme: '+themes[currentTheme].name); }
+    else if (ctrl && e.key==='b') { e.preventDefault(); document.getElementById('sidebar').classList.toggle('collapsed'); }
+  });
+
+  // ─── Theme dots ───
+  const dots = document.getElementById('themeDots');
+  themes.forEach((t,i) => {
+    const d = document.createElement('div');
+    d.className = 'theme-dot'+(i===0?' active':'');
+    d.style.background = t.text;
+    d.title = t.label;
+    d.onclick = () => applyTheme(i);
+    dots.appendChild(d);
+  });
+
+  // ─── Toast ───
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = '> '+msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 1600);
+  }
+
+  // ─── Init ───
+  async function init() {
+    await initAPI();
+    initCM();
+    applyTheme(0);
+    createTab('untitled', '// BYTE — TUI Code Editor\n// Start typing or open a file (Ctrl+O)\n\nfunction hello() {\n  console.log("Welcome to BYTE!");\n}\n\nhello();\n');
+  }
+
+  // Expose for Tauri dialog
+  window.__TAURI__?.dialog?.open();
+  window.__TAURI__?.dialog?.save();
+
+  init();
+  </script>
+</body>
+</html>

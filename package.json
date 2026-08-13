@@ -1,0 +1,37 @@
+{
+  "name": "shmd",
+  "version": "1.0.0",
+  "private": true,
+  "main": "electron/main.js",
+  "scripts": {
+    "build": "cd src-tauri && cargo tauri build",
+    "build-portable": "cd src-tauri && cargo tauri build --bundles none",
+    "electron": "electron .",
+    "electron-build": "electron-builder --win portable --linux AppImage",
+    "electron-build-win": "electron-builder --win portable",
+    "electron-build-linux": "electron-builder --linux AppImage"
+  },
+  "build": {
+    "appId": "com.shmd.editor",
+    "productName": "SH.MD",
+    "files": [
+      "www/**/*",
+      "electron/**/*"
+    ],
+    "directories": {
+      "output": "dist-electron"
+    },
+    "win": {
+      "target": "portable",
+      "icon": "www/icon.ico"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "www"
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  }
+}
