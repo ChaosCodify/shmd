@@ -999,7 +999,7 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
       };
       const saveCb=()=>next();
       mk('Save',true,()=>{t.filePath?executeSave(t,saveCb,t.content):executeSaveAs(t,saveCb,t.content);});
-      if(t.filePath)mk('Don\'t Save',false,()=>{t.modified=false;next();});
+      mk('Don\'t Save',false,()=>{t.modified=false;next();});
       mk('Cancel',false,()=>{});
       ov.onclick=e=>{if(e.target===ov)ov.classList.remove('open');};
       ov.classList.add('open');
@@ -1023,7 +1023,7 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
       if(t.filePath)executeSave(t,saveCb,t.content);
       else executeSaveAs(t,saveCb,t.content);
     });
-    if(t.filePath)mk('Don\'t Save',false,()=>doCloseTab(t,tabs.indexOf(t)));
+    mk('Don\'t Save',false,()=>{const i=tabs.indexOf(t);if(i>=0)doCloseTab(t,i);});
     mk('Cancel',false,()=>{});
     ov.onclick=e=>{if(e.target===ov)ov.classList.remove('open');};
     ov.classList.add('open');
