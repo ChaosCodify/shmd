@@ -1,5 +1,7 @@
 # SH.MD
 
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Me-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/chaoscodify)
+
 A local markdown editor built with Tauri (Rust) + CodeMirror. No account, no telemetry, no cloud.
 
 Runs entirely on your machine. Your files and sessions stay on disk — nothing is uploaded anywhere.
