@@ -766,11 +766,27 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
   <script>
   // ─── Debug Log to File ───
   const DEBUG_PATH = 'J:\\Project Prompts\\Markdown tool\\shmd-debug.log';
+  const LOG_CAP = 120000;
   let _logBuf = '';
+  let _logTimer = null;
+  let _logLoaded = false;
+  function _logTrim() {
+    if (_logBuf.length > LOG_CAP) _logBuf = _logBuf.slice(Math.floor(_logBuf.length * 0.7));
+  }
+  function _logFlush() {
+    _logTimer = null;
+    _logLoaded = true;
+    try {
+      const p = tauriInvoke('write_file', {path: DEBUG_PATH, content: _logBuf});
+      if (p && typeof p.catch === 'function') p.catch(()=>{});
+    } catch(e) {}
+  }
   function dbg(msg) {
     const line = new Date().toISOString().slice(11,23) + ' ' + msg + '\n';
     _logBuf += line;
-    try { tauriInvoke('write_file', {path: DEBUG_PATH, content: _logBuf}); } catch(e) {}
+    _logTrim();
+    if (_logTimer) clearTimeout(_logTimer);
+    _logTimer = setTimeout(_logFlush, 1000);
   }
 
   // ─── Runtime API (Tauri / Electron) ───
@@ -844,6 +860,24 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
   let tabs=[], activeTabId=null, tabIdCounter=0, groups=[], groupIdCounter=0, currentTheme=0, currentMode='edit', cm;
   const $ = id => document.getElementById(id);
   let cmRestoring=false, isRebinding=false;
+  // lazy tab loading / per-tab undo state
+  let cmLoadedId=null, activateSeq=0;
+  const UNDO_CAP=200;
+  function debounceFn(fn,ms){let h=null;return function(...a){if(h)clearTimeout(h);h=setTimeout(()=>{h=null;fn.apply(this,a);},ms);};}
+  function capHistory(h){
+    if(!h)return {done:[],undone:[]};
+    const cut=a=>(Array.isArray(a)&&a.length>UNDO_CAP)?a.slice(a.length-UNDO_CAP):a;
+    return {done:cut(h.done),undone:cut(h.undone)};
+  }
+  const debouncedPreview=debounceFn(()=>{if(currentMode!=='edit')renderMarkdown();},200);
+  const debouncedStats=debounceFn(()=>updateStats(),300);
+  const debouncedCap=debounceFn(()=>{
+    const t=getActiveTab(); if(!t||!cm||cmLoadedId!==t.id)return;
+    const h=cm.getHistory();
+    if(h.done.length>UNDO_CAP||h.undone.length>UNDO_CAP){
+      const c=capHistory(h); cm.setHistory(c); t.history=c;
+    }
+  },1000);
   function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
   // ─── Custom Shortcuts ───
@@ -939,32 +973,62 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
   }
 
   // ─── Tab Management ───
-  function createTab(name,content,filePath,groupId) {
+  function createTab(name,content,filePath,groupId,activate) {
     const id=++tabIdCounter;
-    tabs.push({id,name,content:content||'',filePath:filePath||null,modified:false,cursor:{line:0,ch:0},scroll:0,groupId:groupId||null});
-    activateTab(id); renderSidebar(); saveSession(); return id;
+    const lazy=(content===null||content===undefined)&&!!filePath;
+    tabs.push({id,name,content:lazy?null:(content||''),filePath:filePath||null,modified:false,cursor:{line:0,ch:0},scroll:0,groupId:groupId||null,history:null});
+    if(activate!==false)activateTab(id);
+    else {renderSidebar();saveSession();}
+    return id;
   }
-  function activateTab(id) {
-    if(activeTabId&&cm){const p=tabs.find(t=>t.id===activeTabId);if(p){p.content=cm.getValue();p.cursor=cm.getCursor();p.scroll=cm.getScrollInfo().top;}}
-    activeTabId=id; const t=tabs.find(t=>t.id===id); if(!t)return;
-    if(cm){
-      cmRestoring=true;
-      cm.setValue(t.content);cm.setCursor(t.cursor);if(t.scroll)cm.scrollTo(null,t.scroll);
-      cmRestoring=false;
-      const mode=guessMode(t.filePath||t.name);
-      if(mode)cm.setOption('mode',mode);
+  async function activateTab(id) {
+    const seq=++activateSeq;
+    // flush outgoing active tab into its own state (and drop clean copies)
+    if(activeTabId&&cm&&cmLoadedId===activeTabId){
+      const p=tabs.find(t=>t.id===activeTabId);
+      if(p&&p.id!==id){
+        p.content=cm.getValue();p.cursor=cm.getCursor();p.scroll=cm.getScrollInfo().top;p.history=capHistory(cm.getHistory());
+        if(!p.modified&&p.filePath)p.content=null;
+        cmLoadedId=null;
+      }
     }
-    else{const ta=$('editor');if(ta){ta.value=t.content||'';}}
+    activeTabId=id; const t=tabs.find(t=>t.id===id); if(!t)return;
     const dn=t.filePath?t.filePath.split(/[/\\]/).pop():t.name;
     $('fileName').textContent=dn;$('fileName').className='file-name'+(t.modified?' modified':'');
     $('statusFile').textContent=dn;
-    renderSidebar(); if(currentMode!=='edit')renderMarkdown(); saveSession();
+    if(cm){
+      if(t.content===null&&t.filePath){
+        // lazy: show empty read-only buffer while reading from disk
+        cmRestoring=true;cm.setValue('');cm.setOption('readOnly',true);cmRestoring=false;
+        let txt=null;
+        try{txt=await tauriInvoke('read_file',{path:t.filePath});}catch(e){dbg('Lazy read failed: '+t.filePath);showToast('Could not read: '+t.name);}
+        t.content=(txt===null||txt===undefined)?'':txt;
+        if(seq!==activateSeq)return;
+        cmRestoring=true;cm.setValue(t.content);cm.setOption('readOnly',false);cmRestoring=false;
+      } else {
+        cmRestoring=true;cm.setValue(t.content||'');cm.setOption('readOnly',false);cmRestoring=false;
+      }
+      if(seq!==activateSeq)return;
+      cm.setCursor(t.cursor||{line:0,ch:0});
+      if(t.scroll)cm.scrollTo(null,t.scroll);
+      cm.clearHistory();
+      if(t.history)cm.setHistory(t.history);
+      cmLoadedId=id;
+      const mode=guessMode(t.filePath||t.name);
+      if(mode)cm.setOption('mode',mode);
+    } else {
+      const ta=$('editor');if(ta)ta.value=t.content||'';
+      cmLoadedId=id;
+    }
+    if(seq!==activateSeq)return;
+    renderSidebar(); if(currentMode!=='edit')renderMarkdown();
+    updateStats(); saveSession();
     setTimeout(()=>{if(cm)cm.refresh();},10);
   }
   function closeTab(id) {
     const idx=tabs.findIndex(t=>t.id===id);if(idx===-1)return;
     const t=tabs[idx];
-    if(activeTabId===t.id&&cm)t.content=cm.getValue();
+    if(activeTabId===t.id&&cm&&cmLoadedId===t.id){t.content=cm.getValue();t.cursor=cm.getCursor();t.scroll=cm.getScrollInfo().top;t.history=capHistory(cm.getHistory());}
     if(t.modified){
       promptUnsaved(t,idx);
       return;
@@ -973,6 +1037,7 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
   }
   function doCloseTab(t,idx){
     const id=t.id;
+    t.history=null;
     tabs.splice(idx,1);
     if(tabs.length===0)createTab('untitled.md','');
     else if(activeTabId===id)activateTab(tabs[Math.min(idx,tabs.length-1)].id);
@@ -998,7 +1063,7 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
         btns.appendChild(b);
       };
       const saveCb=()=>next();
-      mk('Save',true,()=>{t.filePath?executeSave(t,saveCb,t.content):executeSaveAs(t,saveCb,t.content);});
+      mk('Save',true,()=>{t.filePath?executeSave(t,saveCb):executeSaveAs(t,saveCb);});
       mk('Don\'t Save',false,()=>{t.modified=false;next();});
       mk('Cancel',false,()=>{});
       ov.onclick=e=>{if(e.target===ov)ov.classList.remove('open');};
@@ -1020,8 +1085,8 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
     };
     mk('Save',true,()=>{
       const saveCb=(ok)=>{if(ok){const i=tabs.indexOf(t);if(i>=0)doCloseTab(t,i);}};
-      if(t.filePath)executeSave(t,saveCb,t.content);
-      else executeSaveAs(t,saveCb,t.content);
+      if(t.filePath)executeSave(t,saveCb);
+      else executeSaveAs(t,saveCb);
     });
     mk('Don\'t Save',false,()=>{const i=tabs.indexOf(t);if(i>=0)doCloseTab(t,i);});
     mk('Cancel',false,()=>{});
@@ -1417,21 +1482,19 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
         groups.forEach(g=>{if(!('open'in g))g.open=true;});
       }
       let firstId = null;
+      let lastId = null;
       const opened = new Set();
       for (const item of arr) {
         if (!item.path || opened.has(item.path)) continue;
         opened.add(item.path);
-        try {
-          const content = await tauriInvoke('read_file', { path: item.path });
-          if (content !== null && content !== undefined) {
-            const name = item.path.split(/[/\\]/).pop();
-            const gid=(data.groups&&item.groupId&&groups.some(g=>g.id===item.groupId))?item.groupId:null;
-            const id = createTab(name, content, item.path, gid);
-            if (item.active) firstId = id;
-          }
-        } catch(e) { dbg('Session restore failed: ' + item.path); }
+        const name = item.path.split(/[/\\]/).pop();
+        const gid=(data.groups&&item.groupId&&groups.some(g=>g.id===item.groupId))?item.groupId:null;
+        // lazy: content is read from disk only when the tab is activated
+        const id = createTab(name, null, item.path, gid, false);
+        if (item.active) firstId = id;
+        lastId = id;
       }
-      if (firstId) activateTab(firstId);
+      if (firstId || lastId) activateTab(firstId || lastId);
       return true;
     } catch(e) { return false; }
   }
@@ -1446,8 +1509,16 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
         extraKeys:{"Tab":(cm)=>{const s=cm.getSelection();if(s)cm.indentSelection("add");else cm.replaceSelection("\t");}}
       });
       cm.on('change',()=>{
-        const t=getActiveTab();if(t&&!cmRestoring){t.content=cm.getValue();t.modified=true;$('fileName').className='file-name modified';renderSidebar();}
-        if(!cmRestoring){if(currentMode!=='edit')renderMarkdown();updateStats();}
+        if(cmRestoring)return;
+        const t=getActiveTab();
+        if(!t||t.id!==cmLoadedId)return;
+        t.content=cm.getValue();
+        if(!t.modified){
+          t.modified=true;
+          $('fileName').className='file-name modified';
+          renderSidebar();
+        }
+        debouncedPreview(); debouncedStats(); debouncedCap();
       });
       cm.on('cursorActivity',()=>{const c=cm.getCursor();$('statusCursor').textContent=`Ln ${c.line+1} Col ${c.ch+1}`;});
     } catch(e) { cm = null; }
@@ -2221,8 +2292,8 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
   const CTX_TAB_ITEMS=[
     {id:'newgroup',label:'New Group…',action:()=>newGroup(undefined,undefined,groupInsertIdxForTabId(ctxTabId))},
     {sep:true},
-    {id:'save',label:'Save',hk:'Ctrl+S',action:()=>{const t=tabs.find(t=>t.id===ctxTabId);if(t){if(t.filePath)executeSave(t,null,t.content);else executeSaveAs(t,null,t.content);}}},
-    {id:'saveas',label:'Save As…',action:()=>{const t=tabs.find(t=>t.id===ctxTabId);if(t)executeSaveAs(t,null,t.content);}},
+    {id:'save',label:'Save',hk:'Ctrl+S',action:()=>{const t=tabs.find(t=>t.id===ctxTabId);if(t){if(t.filePath)executeSave(t,null);else executeSaveAs(t,null);}}},
+    {id:'saveas',label:'Save As…',action:()=>{const t=tabs.find(t=>t.id===ctxTabId);if(t)executeSaveAs(t,null);}},
     {sep:true},
     {id:'close',label:'Close',hk:'Ctrl+W',action:()=>{closeTab(ctxTabId);ctxTabId=null;}},
     {id:'closeothers',label:'Close Others',action:()=>{const keep=ctxTabId;tabs.filter(t=>t.id!==keep).forEach(t=>closeTab(t.id));ctxTabId=null;}},
@@ -2231,36 +2302,54 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
     {id:'copyname',label:'Copy File Name',action:()=>{const t=tabs.find(t=>t.id===ctxTabId);if(t){navigator.clipboard.writeText(t.name);showToast('Copied: '+t.name);}}},
     {id:'copypath',label:'Copy File Path',action:()=>{const t=tabs.find(t=>t.id===ctxTabId);if(t&&t.filePath){navigator.clipboard.writeText(t.filePath);showToast('Copied: '+t.filePath);}}},
   ];
-  function executeSave(tab,cb,content){
-    const data=content!==undefined?content:editorContent();
-    tauriInvoke('write_file',{path:tab.filePath,content:data}).then(()=>{
+  async function tabContentOf(tab){
+    if(activeTabId===tab.id){
+      if(cm&&cmLoadedId===tab.id)return cm.getValue();
+      if(!cm){const ta=$('editor');if(ta)return ta.value;}
+    }
+    if(tab.content!==null&&tab.content!==undefined)return tab.content;
+    if(tab.filePath){
+      try{const r=await tauriInvoke('read_file',{path:tab.filePath});return (r===null||r===undefined)?'':r;}
+      catch(e){showToast('Could not read: '+tab.name);return '';}
+    }
+    return '';
+  }
+  async function executeSave(tab,cb,content){
+    try{
+      const data=(content!==undefined&&content!==null)?content:await tabContentOf(tab);
+      await tauriInvoke('write_file',{path:tab.filePath,content:data});
       tab.modified=false;$('fileName').className='file-name';renderSidebar();showToast('Saved');saveSession();
       if(cb)cb(true);
-    }).catch(()=>{showToast('Save failed');if(cb)cb(false);});
+    }catch(e){showToast('Save failed');if(cb)cb(false);}
   }
-  function executeSaveAs(tab,cb,content){
+  async function executeSaveAs(tab,cb,content){
     const defaultName = tab.name || 'untitled.md';
-    const data=content!==undefined?content:editorContent();
-    tauriInvoke('plugin:dialog|save',{
-      options:{
-        defaultPath: defaultName,
-        filters: [
-          {name:'Markdown',extensions:['md']},
-          {name:'Text Files',extensions:['txt','log','ini','cfg','conf','yaml','yml','json','xml','csv','html','css','js','ts','py','rb','sh','bat','ps1']},
-          {name:'All Files',extensions:['*']}
-        ]
-      }
-    }).then(fp=>{
-      if(!fp){if(cb)cb(false);return;}
-      let savePath = fp;
-      if(!savePath.includes('.')) savePath += '.md';
-      tauriInvoke('write_file',{path:savePath,content:data}).then(()=>{
-        tab.filePath=savePath;tab.name=savePath.split(/[/\\]/).pop();tab.modified=false;
-        if(activeTabId===tab.id){const dn=tab.name;$('fileName').textContent=dn;$('fileName').className='file-name';$('statusFile').textContent=dn;}
-        renderSidebar();showToast('Saved as '+tab.name);saveSession();
-        if(cb)cb(true);
-      }).catch(()=>{showToast('Save failed');if(cb)cb(false);});
-    }).catch(()=>{showToast('Save cancelled');if(cb)cb(false);});
+    let data;
+    try{data=(content!==undefined&&content!==null)?content:await tabContentOf(tab);}
+    catch(e){data='';}
+    let fp;
+    try{
+      fp=await tauriInvoke('plugin:dialog|save',{
+        options:{
+          defaultPath: defaultName,
+          filters: [
+            {name:'Markdown',extensions:['md']},
+            {name:'Text Files',extensions:['txt','log','ini','cfg','conf','yaml','yml','json','xml','csv','html','css','js','ts','py','rb','sh','bat','ps1']},
+            {name:'All Files',extensions:['*']}
+          ]
+        }
+      });
+    }catch(e){showToast('Save cancelled');if(cb)cb(false);return;}
+    if(!fp){if(cb)cb(false);return;}
+    let savePath = fp;
+    if(!savePath.includes('.')) savePath += '.md';
+    try{
+      await tauriInvoke('write_file',{path:savePath,content:data});
+      tab.filePath=savePath;tab.name=savePath.split(/[/\\]/).pop();tab.modified=false;
+      if(activeTabId===tab.id){const dn=tab.name;$('fileName').textContent=dn;$('fileName').className='file-name';$('statusFile').textContent=dn;}
+      renderSidebar();showToast('Saved as '+tab.name);saveSession();
+      if(cb)cb(true);
+    }catch(e){showToast('Save failed');if(cb)cb(false);}
   }
   function showTabCtxMenu(e,tabId){
     dbg('showTabCtxMenu tabId='+tabId);
@@ -2307,7 +2396,10 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
   });
   // ─── ToaSH: small debug program ───
   const TOASH_TABS=['console','repl','state','sys'];
-  $('toashClose').onclick=()=>{$('debugPanel').style.display='none';};
+  let _tshTimer=null;
+  function startTshPoll(){if(_tshTimer)return;_tshTimer=setInterval(()=>{if($('tshAutoFr').checked)refreshDebugLog();},2000);}
+  function stopTshPoll(){if(_tshTimer){clearInterval(_tshTimer);_tshTimer=null;}}
+  $('toashClose').onclick=()=>{$('debugPanel').style.display='none';stopTshPoll();};
   document.querySelectorAll('.toash-tab').forEach(b=>{b.onclick=()=>toashActivate(b.dataset.v);});
   $('debugRefresh').onclick=refreshDebugLog;
   $('debugClear').onclick=()=>{_logBuf='';try{tauriInvoke('write_file',{path:DEBUG_PATH,content:''});}catch(e){}renderToashLog();};
@@ -2323,7 +2415,6 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
   $('tshReplRun').onclick=toashRun;
   $('tshReplClear').onclick=()=>{$('tshReplOut').innerHTML='';};
   $('tshReplIn').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();toashRun();}});
-  setInterval(()=>{if($('debugPanel').style.display!=='none'&&$('tshAutoFr').checked)refreshDebugLog();},2000);
   function toashActivate(v){
     document.querySelectorAll('.toash-tab').forEach(b=>{
       const on=b.dataset.v===v;
@@ -2344,7 +2435,7 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
       const p=$('debugPanel');
       const show=(p.style.display==='none')||(p.style.display==='');
       p.style.display=show?'block':'none';
-      if(show)toashActivate('console');
+      if(show){toashActivate('console');startTshPoll();}else stopTshPoll();
     }
   };
   toashActivate('console');
@@ -2367,7 +2458,10 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
     v.scrollTop=v.scrollHeight;
   }
   function refreshDebugLog(){
-    tauriInvoke('read_file',{path:DEBUG_PATH}).then(c=>{if(c!==null&&c!==undefined)_logBuf=c;renderToashLog();}).catch(()=>renderToashLog());
+    tauriInvoke('read_file',{path:DEBUG_PATH}).then(c=>{
+      if(c!==null&&c!==undefined&&!_logLoaded){_logLoaded=true;_logBuf=String(c)+_logBuf;_logTrim();}
+      renderToashLog();
+    }).catch(()=>renderToashLog());
   }
   function toashRun(){
     const inp=$('tshReplIn'),out=$('tshReplOut');
