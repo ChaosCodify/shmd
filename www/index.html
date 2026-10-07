@@ -1078,6 +1078,8 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
             const r=await readFpFile(t.filePath);
             t.content=r.content; t.origMtime=r.mtime; t.origHash=r.hash;
           }catch(e){dbg('Lazy read failed: '+t.filePath);showToast('Could not read: '+t.name);t.content='';t.origMtime=0;t.origHash='';}
+          // no draft behind this tab — it has no unsaved edits
+          t.modified=false; t.hasDraft=false;
         }
         if(seq!==activateSeq)return;
         $('fileName').className='file-name'+(t.modified?' modified':'');
@@ -1535,47 +1537,90 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
   }
   function hideColorPicker(){$('colorPickerOverlay').classList.remove('open');}
 
-  // ─── Session Save/Load ───
-  const SESSION_PATH = 'J:\\Project Prompts\\Markdown tool\\shmd-session.json';
-  function saveSession() {
-    const data = {
+  // ─── Session Save/Load (app_data/session.json; legacy path as fallback) ───
+  const LEGACY_SESSION_PATH = 'J:\\Project Prompts\\Markdown tool\\shmd-session.json';
+  let SESSION_PATH = LEGACY_SESSION_PATH;
+  function sessionData() {
+    return {
       groups: groups.map(g=>({id:g.id,name:g.name,color:g.color,open:g.open})),
       tabs: tabs
         .filter(t => t.filePath)
         .map(t => ({ path: t.filePath, active: t.id === activeTabId, groupId: t.groupId||null }))
     };
-    try { tauriInvoke('write_file', { path: SESSION_PATH, content: JSON.stringify(data) }); } catch(e) {}
+  }
+  function saveSession() {
+    try { const p=writeFile(SESSION_PATH,JSON.stringify(sessionData())); if(p&&typeof p.catch==='function')p.catch(()=>{}); } catch(e) {}
   }
   async function loadSession() {
+    let data = null, arr = null;
     try {
-      const raw = await tauriInvoke('read_file', { path: SESSION_PATH });
-      if (!raw) return false;
-      const data = JSON.parse(raw);
-      // legacy flat array support
-      const arr = Array.isArray(data) ? data : data.tabs;
-      if (!Array.isArray(arr) || arr.length === 0) return false;
-      // restore groups first
-      if(data.groups&&Array.isArray(data.groups)){
-        groups=data.groups;
-        groupIdCounter=groups.reduce((m,g)=>Math.max(m,parseInt(String(g.id).replace(/\D/g,'')||0)),0);
-        groups.forEach(g=>{if(!('open'in g))g.open=true;});
+      let raw = null;
+      try { raw = await tauriInvoke('read_file', { path: SESSION_PATH }); } catch(e) {}
+      if ((raw===null||raw===undefined||raw==='') && SESSION_PATH!==LEGACY_SESSION_PATH) {
+        try {
+          raw = await tauriInvoke('read_file', { path: LEGACY_SESSION_PATH });
+          if (raw) { dbg('Session migrated from legacy path'); saveSession(); }
+        } catch(e) {}
       }
-      let firstId = null;
-      let lastId = null;
-      const opened = new Set();
-      for (const item of arr) {
-        if (!item.path || opened.has(item.path)) continue;
-        opened.add(item.path);
-        const name = item.path.split(/[/\\]/).pop();
-        const gid=(data.groups&&item.groupId&&groups.some(g=>g.id===item.groupId))?item.groupId:null;
-        // lazy: content is read from disk only when the tab is activated
-        const id = createTab(name, null, item.path, gid, false);
-        if (item.active) firstId = id;
-        lastId = id;
+      if (raw) {
+        try { data = JSON.parse(raw); } catch(e) { data = null; }
+        if (data) { arr = Array.isArray(data) ? data : data.tabs; if (!Array.isArray(arr)) arr = null; }
       }
-      if (firstId || lastId) activateTab(firstId || lastId);
-      return true;
-    } catch(e) { return false; }
+    } catch(e) {}
+    // restore groups first
+    if(data&&data.groups&&Array.isArray(data.groups)){
+      groups=data.groups;
+      groupIdCounter=groups.reduce((m,g)=>Math.max(m,parseInt(String(g.id).replace(/\D/g,'')||0)),0);
+      groups.forEach(g=>{if(!('open'in g))g.open=true;});
+    }
+    let firstId = null;
+    let lastId = null;
+    const opened = new Set();
+    if (arr) for (const item of arr) {
+      if (!item.path || opened.has(item.path)) continue;
+      opened.add(item.path);
+      const name = item.path.split(/[/\\]/).pop();
+      const gid=(data&&data.groups&&item.groupId&&groups.some(g=>g.id===item.groupId))?item.groupId:null;
+      // lazy: content is read from disk (or the draft) only when the tab is activated
+      const id = createTab(name, null, item.path, gid, false);
+      if (item.active) firstId = id;
+      lastId = id;
+    }
+    // crash recovery: attach drafts — mark saved tabs dirty, append orphans
+    let recovered = 0;
+    let drafts = [];
+    try { drafts = (await tauriInvoke('list_drafts')) || []; } catch(e) {}
+    if (Array.isArray(drafts)) for (const d of drafts) {
+      if (!d || !d.path) continue;
+      if (opened.has(d.path)) {
+        const tb = tabs.find(x=>x.filePath===d.path);
+        if (tb) { tb.modified = true; tb.hasDraft = true; }
+        recovered++;
+      } else {
+        createTab(d.path.split(/[/\\]/).pop(), null, d.path, null, false);
+        opened.add(d.path);
+        recovered++;
+      }
+    }
+    const act = firstId || lastId || (tabs.length ? tabs[tabs.length-1].id : null);
+    if (act) activateTab(act);
+    return { restored: tabs.length > 0, recovered };
+  }
+
+  // ─── Close handshake: Rust asks us to flush before the window dies ───
+  function initCloseFlush() {
+    const t = window.__TAURI__;
+    if (!(t && t.event && typeof t.event.listen === 'function')) return;
+    try {
+      t.event.listen('flush-before-close', () => {
+        (async () => {
+          try { if(_logTimer){clearTimeout(_logTimer);_logTimer=null;_logFlush();} } catch(e) {}
+          try { for (const tb of tabs) { if (tb.filePath && tb.modified) await saveDraft(tb); } } catch(e) {}
+          try { await writeFile(SESSION_PATH, JSON.stringify(sessionData())); } catch(e) {}
+          try { await t.core.invoke('finish_close'); } catch(e) {}
+        })();
+      });
+    } catch(e) {}
   }
 
   // ─── CodeMirror ───
@@ -2812,13 +2857,21 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
   const rt = window.__TAURI__ ? 'Tauri' : window.__ELECTRON__ ? 'Electron' : 'Browser';
   $('abtRuntime').textContent = rt;
   $('abtBuildDate').textContent = new Date().toISOString().slice(0,10);
-  loadSession().then(restored => {
-    if (!restored) {
+  (async () => {
+    try {
+      const d = await tauriInvoke('app_data_dir');
+      if (d) SESSION_PATH = String(d).replace(/[\\/]+$/,'') + '/session.json';
+    } catch(e) {}
+    initCloseFlush();
+    const r = await loadSession();
+    if (!(r && r.restored)) {
       createTab('Welcome','# Welcome to SH.MD\n\nA **modern** markdown editor for developers.\n\n## Features\n\n- **Edit / View / Split** modes — toggle with Ctrl+E\n- **13 themes** — cycle with Ctrl+T, pick in Settings\n- **Tabs** for multiple files\n- **Session restore** — reopens files on launch\n- **Keyboard shortcuts** — Ctrl+S save, Ctrl+O open, Ctrl+B sidebar\n\n## Code Example\n\n```python\ndef greet(name):\n    return f"Hello, {name}!"\n\nprint(greet("SH.MD"))\n```',null);
+    } else if (r.recovered) {
+      showToast('Recovered ' + r.recovered + ' unsaved file(s)');
     } else {
       showToast('Restored ' + tabs.length + ' file(s)');
     }
-  });
+  })();
   </script>
 </body>
 </html>

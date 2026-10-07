@@ -1,10 +1,11 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[tauri::command]
 fn read_file(path: String) -> Result<String, String> {
@@ -243,9 +244,27 @@ fn close_window(window: tauri::Window) {
     let _ = window.close();
 }
 
+// ─── Close handshake: flush drafts/session before the window goes away ───
+
+static FLUSH_DONE: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+fn finish_close(window: tauri::Window) {
+    FLUSH_DONE.store(true, Ordering::SeqCst);
+    let _ = window.close();
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if !FLUSH_DONE.load(Ordering::SeqCst) {
+                    api.prevent_close();
+                    let _ = window.emit("flush-before-close", ());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             read_file,
             write_file,
@@ -260,6 +279,7 @@ pub fn run() {
             minimize_window,
             toggle_maximize_window,
             close_window,
+            finish_close,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
