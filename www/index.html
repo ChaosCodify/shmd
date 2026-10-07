@@ -878,6 +878,66 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
       const c=capHistory(h); cm.setHistory(c); t.history=c;
     }
   },1000);
+
+  // ─── Drafts (Rust-backed; originals untouched until explicit Save) ───
+  function askConfirm(title,msg,okLabel,cancelLabel){
+    return new Promise(res=>{
+      const ov=$('confirmOverlay');
+      $('confirmTitle').textContent=title;
+      $('confirmMsg').textContent=msg;
+      const btns=$('confirmBtns');btns.innerHTML='';
+      const mk=(label,primary,v)=>{
+        const b=document.createElement('button');
+        b.textContent=label;
+        b.style.cssText='padding:5px 16px;font-size:11px;border-radius:3px;cursor:pointer;font-family:var(--font);'+(primary?'background:var(--accent);border:1px solid var(--border);color:#fff;font-weight:600;':'background:var(--bg3);border:1px solid var(--border);color:var(--text2);');
+        b.onclick=()=>{ov.classList.remove('open');res(v);};
+        btns.appendChild(b);
+      };
+      mk(okLabel||'OK',true,true);
+      mk(cancelLabel||'Cancel',false,false);
+      ov.onclick=e=>{if(e.target===ov){ov.classList.remove('open');res(false);}};
+      ov.classList.add('open');
+    });
+  }
+  async function fileFp(path){
+    try{return await tauriInvoke('file_fingerprint',{path});}catch(e){return null;}
+  }
+  async function readFpFile(path){
+    try{return await tauriInvoke('read_file_fp',{path});}
+    catch(e){
+      const c=await tauriInvoke('read_file',{path});
+      return {content:(c===null||c===undefined)?'':c,mtime:0,hash:''};
+    }
+  }
+  async function writeFile(path,content){
+    try{return await tauriInvoke('write_file_atomic',{path,content});}
+    catch(e){await tauriInvoke('write_file',{path,content});return null;}
+  }
+  async function saveDraft(t){
+    if(!t.filePath||t.content===null||t.content===undefined)return false;
+    const gen=t._dg||0;
+    try{
+      await tauriInvoke('save_draft',{path:t.filePath,content:t.content,mtime:Number(t.origMtime)||0,hash:String(t.origHash||'')});
+      if((t._dg||0)!==gen){ // draft was cleared while writing — remove the ghost
+        try{await tauriInvoke('delete_draft',{path:t.filePath});}catch(e){}
+        return false;
+      }
+      t.hasDraft=true;
+      return true;
+    }catch(e){dbg('Draft save failed: '+t.filePath);return false;}
+  }
+  function scheduleDraft(t){
+    if(!t.filePath)return;
+    if(t._draftTimer)clearTimeout(t._draftTimer);
+    t._draftTimer=setTimeout(()=>{t._draftTimer=null;saveDraft(t);},1000);
+  }
+  async function clearDraft(t){
+    if(t._draftTimer){clearTimeout(t._draftTimer);t._draftTimer=null;}
+    t._dg=(t._dg||0)+1;
+    t.hasDraft=false;
+    if(!t.filePath)return;
+    try{await tauriInvoke('delete_draft',{path:t.filePath});}catch(e){}
+  }
   function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
   // ─── Custom Shortcuts ───
@@ -984,26 +1044,43 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
   async function activateTab(id) {
     const seq=++activateSeq;
     // flush outgoing active tab into its own state (and drop clean copies)
+    let flushing=null;
     if(activeTabId&&cm&&cmLoadedId===activeTabId){
       const p=tabs.find(t=>t.id===activeTabId);
       if(p&&p.id!==id){
         p.content=cm.getValue();p.cursor=cm.getCursor();p.scroll=cm.getScrollInfo().top;p.history=capHistory(cm.getHistory());
-        if(!p.modified&&p.filePath)p.content=null;
         cmLoadedId=null;
+        if(p.filePath&&p.modified)flushing=p;   // persist edits before releasing them
+        else if(p.filePath)p.content=null;
       }
     }
     activeTabId=id; const t=tabs.find(t=>t.id===id); if(!t)return;
+    if(flushing){
+      if(await saveDraft(flushing))flushing.content=null;
+      if(seq!==activateSeq)return;
+    }
     const dn=t.filePath?t.filePath.split(/[/\\]/).pop():t.name;
     $('fileName').textContent=dn;$('fileName').className='file-name'+(t.modified?' modified':'');
     $('statusFile').textContent=dn;
     if(cm){
       if(t.content===null&&t.filePath){
-        // lazy: show empty read-only buffer while reading from disk
+        // lazy: show empty read-only buffer while loading (draft first, then disk)
         cmRestoring=true;cm.setValue('');cm.setOption('readOnly',true);cmRestoring=false;
-        let txt=null;
-        try{txt=await tauriInvoke('read_file',{path:t.filePath});}catch(e){dbg('Lazy read failed: '+t.filePath);showToast('Could not read: '+t.name);}
-        t.content=(txt===null||txt===undefined)?'':txt;
+        let draft=null;
+        try{draft=await tauriInvoke('load_draft',{path:t.filePath});}catch(e){}
+        if(draft){
+          t.content=(draft.content===null||draft.content===undefined)?'':draft.content;
+          t.modified=true;
+          t.origMtime=draft.orig_mtime; t.origHash=draft.orig_hash;
+          t.hasDraft=true;
+        } else {
+          try{
+            const r=await readFpFile(t.filePath);
+            t.content=r.content; t.origMtime=r.mtime; t.origHash=r.hash;
+          }catch(e){dbg('Lazy read failed: '+t.filePath);showToast('Could not read: '+t.name);t.content='';t.origMtime=0;t.origHash='';}
+        }
         if(seq!==activateSeq)return;
+        $('fileName').className='file-name'+(t.modified?' modified':'');
         cmRestoring=true;cm.setValue(t.content);cm.setOption('readOnly',false);cmRestoring=false;
       } else {
         cmRestoring=true;cm.setValue(t.content||'');cm.setOption('readOnly',false);cmRestoring=false;
@@ -1038,6 +1115,8 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
   function doCloseTab(t,idx){
     const id=t.id;
     t.history=null;
+    if(t._draftTimer){clearTimeout(t._draftTimer);t._draftTimer=null;}
+    t._dg=(t._dg||0)+1;
     tabs.splice(idx,1);
     if(tabs.length===0)createTab('untitled.md','');
     else if(activeTabId===id)activateTab(tabs[Math.min(idx,tabs.length-1)].id);
@@ -1088,7 +1167,7 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
       if(t.filePath)executeSave(t,saveCb);
       else executeSaveAs(t,saveCb);
     });
-    mk('Don\'t Save',false,()=>{const i=tabs.indexOf(t);if(i>=0)doCloseTab(t,i);});
+    mk('Don\'t Save',false,()=>{clearDraft(t);const i=tabs.indexOf(t);if(i>=0)doCloseTab(t,i);});
     mk('Cancel',false,()=>{});
     ov.onclick=e=>{if(e.target===ov)ov.classList.remove('open');};
     ov.classList.add('open');
@@ -1518,7 +1597,7 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
           $('fileName').className='file-name modified';
           renderSidebar();
         }
-        debouncedPreview(); debouncedStats(); debouncedCap();
+        debouncedPreview(); debouncedStats(); debouncedCap(); scheduleDraft(t);
       });
       cm.on('cursorActivity',()=>{const c=cm.getCursor();$('statusCursor').textContent=`Ln ${c.line+1} Col ${c.ch+1}`;});
     } catch(e) { cm = null; }
@@ -1588,7 +1667,8 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
         if(existing){activateTab(existing.id);continue;}
         const content=await f.text();
         const name=fp?fp.split(/[/\\]/).pop():f.name;
-        createTab(name,content,fp);
+        const id=createTab(name,content,fp);
+        if(fp){const t=tabs.find(x=>x.id===id);const f2=await fileFp(fp);if(t&&f2){t.origMtime=f2.mtime;t.origHash=f2.hash;}}
         showToast('Opened: '+name);
       }catch(err){showToast('Error reading file');}
     }
@@ -1611,12 +1691,14 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
         for(const fp of files){
           const existing=tabs.find(t=>t.filePath===fp);
           if(existing){activateTab(existing.id);continue;}
-          const content=await tauriInvoke('read_file',{path:fp});
-          if(content!==null&&content!==undefined){
+          try{
+            const r=await readFpFile(fp);
             const name=fp.split(/[/\\]/).pop();
-            createTab(name,content,fp);
+            const id=createTab(name,r.content,fp);
+            const t=tabs.find(x=>x.id===id);
+            if(t){t.origMtime=r.mtime;t.origHash=r.hash;}
             showToast('Opened: '+name);
-          }
+          }catch(e){dbg('Open failed: '+fp);}
         }
       }
     }catch(e){
@@ -2294,6 +2376,25 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
     {sep:true},
     {id:'save',label:'Save',hk:'Ctrl+S',action:()=>{const t=tabs.find(t=>t.id===ctxTabId);if(t){if(t.filePath)executeSave(t,null);else executeSaveAs(t,null);}}},
     {id:'saveas',label:'Save As…',action:()=>{const t=tabs.find(t=>t.id===ctxTabId);if(t)executeSaveAs(t,null);}},
+    {id:'revert',label:'Revert to Saved',visible:()=>{const t=tabs.find(t=>t.id===ctxTabId);return !!(t&&t.filePath);},action:async()=>{
+      const t=tabs.find(t=>t.id===ctxTabId);
+      if(!t||!t.filePath)return;
+      const ok=await askConfirm('Revert to Saved',`Discard all changes to "${t.name}" and reload it from disk?`,'Revert');
+      if(!ok)return;
+      let r;
+      try{r=await readFpFile(t.filePath);}catch(e){showToast('Could not read: '+t.name);return;}
+      const isActive=activeTabId===t.id&&cm&&cmLoadedId===t.id;
+      t.content=r.content;t.origMtime=r.mtime;t.origHash=r.hash;t.modified=false;
+      t.cursor={line:0,ch:0};t.scroll=0;
+      await clearDraft(t);
+      if(isActive){
+        cmRestoring=true;cm.setValue(r.content);cmRestoring=false;
+        cm.setCursor({line:0,ch:0});
+        $('fileName').className='file-name';
+      }
+      renderSidebar();
+      showToast('Reverted: '+t.name);
+    }},
     {sep:true},
     {id:'close',label:'Close',hk:'Ctrl+W',action:()=>{closeTab(ctxTabId);ctxTabId=null;}},
     {id:'closeothers',label:'Close Others',action:()=>{const keep=ctxTabId;tabs.filter(t=>t.id!==keep).forEach(t=>closeTab(t.id));ctxTabId=null;}},
@@ -2309,7 +2410,18 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
     }
     if(tab.content!==null&&tab.content!==undefined)return tab.content;
     if(tab.filePath){
-      try{const r=await tauriInvoke('read_file',{path:tab.filePath});return (r===null||r===undefined)?'':r;}
+      // unsaved edits live in the draft — prefer it over the on-disk original
+      try{
+        const d=await tauriInvoke('load_draft',{path:tab.filePath});
+        if(d){
+          tab.content=(d.content===null||d.content===undefined)?'':d.content;
+          tab.modified=true;
+          tab.origMtime=d.orig_mtime; tab.origHash=d.orig_hash;
+          tab.hasDraft=true;
+          return tab.content;
+        }
+      }catch(e){}
+      try{const r=await readFpFile(tab.filePath);tab.content=r.content;tab.origMtime=r.mtime;tab.origHash=r.hash;return r.content;}
       catch(e){showToast('Could not read: '+tab.name);return '';}
     }
     return '';
@@ -2317,8 +2429,19 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
   async function executeSave(tab,cb,content){
     try{
       const data=(content!==undefined&&content!==null)?content:await tabContentOf(tab);
-      await tauriInvoke('write_file',{path:tab.filePath,content:data});
-      tab.modified=false;$('fileName').className='file-name';renderSidebar();showToast('Saved');saveSession();
+      if(tab.filePath&&tab.origMtime){
+        const cur=await fileFp(tab.filePath);
+        if(cur&&(cur.mtime!==tab.origMtime||cur.hash!==tab.origHash)){
+          const ok=await askConfirm('Changed on disk',`"${tab.name}" changed on disk since it was opened or last saved.\nOverwrite those changes?`,'Overwrite');
+          if(!ok){if(cb)cb(false);return;}
+        }
+      }
+      const fp=await writeFile(tab.filePath,data);
+      if(fp){tab.origMtime=fp.mtime;tab.origHash=fp.hash;}
+      else{tab.origMtime=0;tab.origHash='';}
+      tab.modified=false;$('fileName').className='file-name';renderSidebar();showToast('Saved');
+      await clearDraft(tab);
+      saveSession();
       if(cb)cb(true);
     }catch(e){showToast('Save failed');if(cb)cb(false);}
   }
@@ -2327,9 +2450,9 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
     let data;
     try{data=(content!==undefined&&content!==null)?content:await tabContentOf(tab);}
     catch(e){data='';}
-    let fp;
+    let fpPath;
     try{
-      fp=await tauriInvoke('plugin:dialog|save',{
+      fpPath=await tauriInvoke('plugin:dialog|save',{
         options:{
           defaultPath: defaultName,
           filters: [
@@ -2340,12 +2463,19 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
         }
       });
     }catch(e){showToast('Save cancelled');if(cb)cb(false);return;}
-    if(!fp){if(cb)cb(false);return;}
-    let savePath = fp;
+    if(!fpPath){if(cb)cb(false);return;}
+    let savePath = fpPath;
     if(!savePath.includes('.')) savePath += '.md';
     try{
-      await tauriInvoke('write_file',{path:savePath,content:data});
+      const oldPath=tab.filePath;
+      const fp=await writeFile(savePath,data);
+      if(oldPath&&oldPath!==savePath){
+        if(tab._draftTimer){clearTimeout(tab._draftTimer);tab._draftTimer=null;}
+        try{await tauriInvoke('delete_draft',{path:oldPath});}catch(e){}
+      }
       tab.filePath=savePath;tab.name=savePath.split(/[/\\]/).pop();tab.modified=false;
+      if(fp){tab.origMtime=fp.mtime;tab.origHash=fp.hash;}else{tab.origMtime=0;tab.origHash='';}
+      tab.hasDraft=false; tab._dg=(tab._dg||0)+1;
       if(activeTabId===tab.id){const dn=tab.name;$('fileName').textContent=dn;$('fileName').className='file-name';$('statusFile').textContent=dn;}
       renderSidebar();showToast('Saved as '+tab.name);saveSession();
       if(cb)cb(true);
@@ -2357,6 +2487,7 @@ body.mode-split #preview { display:block !important; flex:1 1 50% !important; pa
     ctxTabId=tabId;
     const menu=$('ctxMenuTab');menu.innerHTML='';menu.classList.add('open');
     CTX_TAB_ITEMS.forEach(item=>{
+      if(item.visible&&!item.visible())return;
       if(item.sep){const d=document.createElement('div');d.className='ctx-sep';menu.appendChild(d);return;}
       const d=document.createElement('button');d.className='ctx-item';
       d.innerHTML=item.label+(item.hk?'<span class="hk">'+item.hk+'</span>':'');
